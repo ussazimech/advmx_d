@@ -1,0 +1,83 @@
+// Prisma schema for the Digital Signage CMS
+// LOCAL DEMO: provider "sqlite" works with zero setup.
+// PRODUCTION: switch provider to "postgresql" and set DATABASE_URL
+// to a real Postgres connection string (Railway/Render provide one automatically).
+
+// SQLite has no native enum support (Postgres does), so for the demo these
+// are plain Strings with the allowed values documented here. If you switch
+// the datasource provider to "postgresql" for production, you can restore
+// these as real `enum` blocks and change the field types back — no other
+// code changes needed since the app already passes these as string literals.
+//
+// MediaType:     "IMAGE" | "VIDEO"
+// DisplayStatus: "PENDING" | "PAIRED" | "OFFLINE"
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String     @id @default(cuid())
+  email     String     @unique
+  password  String // bcrypt hash
+  displays  Display[]
+  playlists Playlist[]
+  media     MediaAsset[]
+  createdAt DateTime   @default(now())
+}
+
+model MediaAsset {
+  id           String         @id @default(cuid())
+  type         String // "IMAGE" | "VIDEO"
+  url          String // /uploads/xyz.jpg or full S3 URL later
+  thumbnailUrl String?
+  durationSecs Int            @default(10) // default seconds to show (images); informational for video
+  filename     String
+  sizeBytes    Int
+  ownerId      String
+  owner        User           @relation(fields: [ownerId], references: [id])
+  playlistItems PlaylistItem[]
+  createdAt    DateTime       @default(now())
+}
+
+model Playlist {
+  id        String         @id @default(cuid())
+  name      String
+  ownerId   String
+  owner     User           @relation(fields: [ownerId], references: [id])
+  items     PlaylistItem[]
+  displays  Display[]
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+}
+
+model PlaylistItem {
+  id               String     @id @default(cuid())
+  playlistId       String
+  playlist         Playlist   @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  mediaId          String
+  media            MediaAsset @relation(fields: [mediaId], references: [id])
+  order            Int // 0-based position in the sequence
+  durationOverride Int? // optional override of media's default duration, in seconds
+}
+
+model Display {
+  id           String        @id @default(cuid())
+  name         String?
+  pairingCode  String?       @unique // 6-digit human code, cleared once claimed
+  deviceToken  String        @unique // long secret the physical screen authenticates with
+  status       String        @default("PENDING") // "PENDING" | "PAIRED" | "OFFLINE"
+  ownerId      String?
+  owner        User?         @relation(fields: [ownerId], references: [id])
+  playlistId   String?
+  playlist     Playlist?     @relation(fields: [playlistId], references: [id])
+  orientation  String        @default("landscape")
+  lastSeenAt   DateTime?
+  createdAt    DateTime      @default(now())
+}
+
