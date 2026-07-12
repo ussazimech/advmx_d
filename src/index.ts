@@ -25,7 +25,7 @@ app.use("/uploads", express.static(path.join(__dirname, "..", "uploads")));
 // Serve the basic fullscreen player at /player.html
 app.use(express.static(path.join(__dirname, "..", "public")));
 
-app.get("/", (_req, res) => res.json({ ok: true, service: "signage-cms" }));
+app.get("/", (_req, res) => res.json({ ok: true, service: "advmx v0.0.1" }));
 
 app.use("/api/auth", authRoutes);
 app.use("/api/media", mediaRoutes);
@@ -35,11 +35,20 @@ app.use("/api/displays", displayRoutes);
 // Centralized error handler — catches multer errors (bad file type, too large)
 // and anything else thrown synchronously in a route, returning JSON instead
 // of Express's default HTML error page.
-app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error(err);
-  const status = err.status || (err.code === "LIMIT_FILE_SIZE" ? 413 : 400);
-  res.status(status).json({ error: err.message || "Unexpected server error" });
-});
+app.use(
+  (
+    err: any,
+    _req: express.Request,
+    res: express.Response,
+    _next: express.NextFunction,
+  ) => {
+    console.error(err);
+    const status = err.status || (err.code === "LIMIT_FILE_SIZE" ? 413 : 400);
+    res
+      .status(status)
+      .json({ error: err.message || "Unexpected server error" });
+  },
+);
 
 // Socket.io: each display joins a room named after its own id so the
 // server can push a targeted "content-updated" event to just that screen.

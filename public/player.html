@@ -1,208 +1,260 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8" />
-<title>Signage Player</title>
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<style>
-  html, body {
-    margin: 0; padding: 0; width: 100%; height: 100%;
-    background: #000; overflow: hidden;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  }
-  #stage { width: 100vw; height: 100vh; position: relative; background: #000; }
-  #stage img, #stage video {
-    width: 100%; height: 100%; object-fit: contain;
-    position: absolute; top: 0; left: 0;
-    background: #000;
-  }
-  /* Pairing / status screen */
-  #pairing {
-    position: absolute; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; color: #fff; text-align: center;
-    background: #0b0b0f;
-  }
-  #pairing h1 { font-size: 1.5rem; font-weight: 400; opacity: 0.7; margin-bottom: 0.5rem; }
-  #pairing .code {
-    font-size: 6rem; font-weight: 700; letter-spacing: 0.2em;
-    margin: 1rem 0; font-variant-numeric: tabular-nums;
-  }
-  #pairing p { opacity: 0.5; font-size: 1rem; max-width: 28rem; }
-  #empty {
-    position: absolute; inset: 0; display: none; align-items: center; justify-content: center;
-    color: #555; font-size: 1.2rem; background: #000;
-  }
-</style>
-</head>
-<body>
-
-<div id="stage"></div>
-
-<div id="pairing">
-  <h1 id="pairing-title">Setting up…</h1>
-  <div class="code" id="pairing-code">······</div>
-  <p id="pairing-help"></p>
-</div>
-
-<div id="empty">No content assigned to this display yet.</div>
-
-<script src="/socket.io/socket.io.js"></script>
-<script>
-(function () {
-  // ---- Config ----------------------------------------------------------
-  const API_BASE = ""; // same origin; set to "https://your-api.example.com" if hosted separately
-  const CONTENT_POLL_MS = 20000; // fallback poll, in case the socket push is missed
-  const HEARTBEAT_POLL_MS = 15000; // how often to check pairing status / send heartbeat
-
-  // ---- Elements ----------------------------------------------------------
-  const stageEl = document.getElementById("stage");
-  const pairingEl = document.getElementById("pairing");
-  const pairingTitleEl = document.getElementById("pairing-title");
-  const pairingCodeEl = document.getElementById("pairing-code");
-  const pairingHelpEl = document.getElementById("pairing-help");
-  const emptyEl = document.getElementById("empty");
-
-  // ---- Local state ---------------------------------------------------------
-  let deviceToken = localStorage.getItem("signage_device_token");
-  let playlist = [];
-  let currentIndex = 0;
-  let playTimer = null;
-  let socket = null;
-
-  function authHeaders() {
-    return { Authorization: "Bearer " + deviceToken };
-  }
-
-  // ---- Step 1: register if we have no stored credentials ----------------
-  async function ensureRegistered() {
-    if (deviceToken) return;
-    const res = await fetch(API_BASE + "/api/displays/register", { method: "POST" });
-    const data = await res.json();
-    deviceToken = data.deviceToken;
-    localStorage.setItem("signage_device_token", deviceToken);
-    showPairingCode(data.pairingCode);
-  }
-
-  function showPairingCode(code) {
-    pairingEl.style.display = "flex";
-    pairingTitleEl.textContent = "Pair this display";
-    pairingCodeEl.textContent = code || "······";
-    pairingHelpEl.textContent =
-      "Enter this code in your Signage dashboard to connect this screen.";
-  }
-
-  // ---- Step 2: poll /me until status is PAIRED ----------------------------
-  async function waitUntilPaired() {
-    const res = await fetch(API_BASE + "/api/displays/me", { headers: authHeaders() });
-    if (res.status === 401) {
-      // Token invalid (e.g. display deleted server-side) — re-register
-      localStorage.removeItem("signage_device_token");
-      deviceToken = null;
-      return false;
-    }
-    const display = await res.json();
-
-    if (display.status === "PENDING") {
-      showPairingCode(display.pairingCode);
-      return false;
-    }
-
-    // PAIRED (or OFFLINE-but-still-claimed): proceed to playback
-    pairingEl.style.display = "none";
-    return true;
-  }
-
-  // ---- Step 3: realtime "refresh now" channel ------------------------------
-  function connectSocket(displayId) {
-    if (socket) return;
-    socket = io(API_BASE || undefined);
-    socket.on("connect", () => socket.emit("join", displayId));
-    socket.on("content-updated", () => fetchContent());
-  }
-
-  // ---- Step 4: fetch and play the assigned playlist ------------------------
-  async function fetchContent() {
-    const res = await fetch(API_BASE + "/api/displays/me/content", { headers: authHeaders() });
-    if (!res.ok) return;
-    const data = await res.json();
-
-    playlist = data.items || [];
-
-    if (playlist.length === 0) {
-      stageEl.innerHTML = "";
-      emptyEl.style.display = "flex";
-      clearTimeout(playTimer);
-      return;
-    }
-
-    emptyEl.style.display = "none";
-    currentIndex = Math.min(currentIndex, playlist.length - 1);
-    playCurrent();
-  }
-
-  function playCurrent() {
-    clearTimeout(playTimer);
-    stageEl.innerHTML = "";
-
-    const item = playlist[currentIndex];
-    if (!item) return;
-
-    if (item.type === "IMAGE") {
-      const img = document.createElement("img");
-      img.src = item.url;
-      stageEl.appendChild(img);
-      const seconds = item.durationSecs && item.durationSecs > 0 ? item.durationSecs : 10;
-      playTimer = setTimeout(advance, seconds * 1000);
-    } else {
-      const video = document.createElement("video");
-      video.src = item.url;
-      video.autoplay = true;
-      video.muted = true; // most kiosk/TV browsers require muted for autoplay
-      video.playsInline = true;
-      video.onended = advance;
-      stageEl.appendChild(video);
-      // Safety net in case onended never fires (e.g. corrupt file)
-      const fallbackSeconds = item.durationSecs && item.durationSecs > 0 ? item.durationSecs : 30;
-      playTimer = setTimeout(advance, (fallbackSeconds + 5) * 1000);
-    }
-  }
-
-  function advance() {
-    currentIndex = (currentIndex + 1) % playlist.length;
-    playCurrent();
-  }
-
-  // ---- Main loop --------------------------------------------------------
-  async function start() {
-    await ensureRegistered();
-
-    // Poll pairing status until claimed
-    const pairedInterval = setInterval(async () => {
-      const paired = await waitUntilPaired();
-      if (paired) {
-        clearInterval(pairedInterval);
-        onPaired();
+  <head>
+    <meta charset="UTF-8" />
+    <title>ADVMX Player</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        background: #000;
+        overflow: hidden;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
-    }, HEARTBEAT_POLL_MS);
+      #stage {
+        width: 100vw;
+        height: 100vh;
+        position: relative;
+        background: #000;
+      }
+      #stage img,
+      #stage video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        position: absolute;
+        top: 0;
+        left: 0;
+        background: #000;
+      }
+      /* Pairing / status screen */
+      #pairing {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        text-align: center;
+        background: #0b0b0f;
+      }
+      #pairing h1 {
+        font-size: 1.5rem;
+        font-weight: 400;
+        opacity: 0.7;
+        margin-bottom: 0.5rem;
+      }
+      #pairing .code {
+        font-size: 6rem;
+        font-weight: 700;
+        letter-spacing: 0.2em;
+        margin: 1rem 0;
+        font-variant-numeric: tabular-nums;
+      }
+      #pairing p {
+        opacity: 0.5;
+        font-size: 1rem;
+        max-width: 28rem;
+      }
+      #empty {
+        position: absolute;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        color: #555;
+        font-size: 1.2rem;
+        background: #000;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="stage"></div>
 
-    // Also check immediately on load
-    const pairedNow = await waitUntilPaired();
-    if (pairedNow) {
-      clearInterval(pairedInterval);
-      onPaired();
-    }
-  }
+    <div id="pairing">
+      <h1 id="pairing-title">Setting up…</h1>
+      <div class="code" id="pairing-code">······</div>
+      <p id="pairing-help"></p>
+    </div>
 
-  async function onPaired() {
-    const res = await fetch(API_BASE + "/api/displays/me", { headers: authHeaders() });
-    const display = await res.json();
-    connectSocket(display.id);
-    await fetchContent();
-    setInterval(fetchContent, CONTENT_POLL_MS); // fallback polling
-  }
+    <div id="empty">No content assigned to this display yet.</div>
 
-  start();
-})();
-</script>
-</body>
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+      (function () {
+        // ---- Config ----------------------------------------------------------
+        const API_BASE = ""; // same origin; set to "https://your-api.example.com" if hosted separately
+        const CONTENT_POLL_MS = 20000; // fallback poll, in case the socket push is missed
+        const HEARTBEAT_POLL_MS = 15000; // how often to check pairing status / send heartbeat
+
+        // ---- Elements ----------------------------------------------------------
+        const stageEl = document.getElementById("stage");
+        const pairingEl = document.getElementById("pairing");
+        const pairingTitleEl = document.getElementById("pairing-title");
+        const pairingCodeEl = document.getElementById("pairing-code");
+        const pairingHelpEl = document.getElementById("pairing-help");
+        const emptyEl = document.getElementById("empty");
+
+        // ---- Local state ---------------------------------------------------------
+        let deviceToken = localStorage.getItem("signage_device_token");
+        let playlist = [];
+        let currentIndex = 0;
+        let playTimer = null;
+        let socket = null;
+
+        function authHeaders() {
+          return { Authorization: "Bearer " + deviceToken };
+        }
+
+        // ---- Step 1: register if we have no stored credentials ----------------
+        async function ensureRegistered() {
+          if (deviceToken) return;
+          const res = await fetch(API_BASE + "/api/displays/register", {
+            method: "POST",
+          });
+          const data = await res.json();
+          deviceToken = data.deviceToken;
+          localStorage.setItem("signage_device_token", deviceToken);
+          showPairingCode(data.pairingCode);
+        }
+
+        function showPairingCode(code) {
+          pairingEl.style.display = "flex";
+          pairingTitleEl.textContent = "Pair this display";
+          pairingCodeEl.textContent = code || "······";
+          pairingHelpEl.textContent =
+            "Enter this code in your Signage dashboard to connect this screen.";
+        }
+
+        // ---- Step 2: poll /me until status is PAIRED ----------------------------
+        async function waitUntilPaired() {
+          const res = await fetch(API_BASE + "/api/displays/me", {
+            headers: authHeaders(),
+          });
+          if (res.status === 401) {
+            // Token invalid (e.g. display deleted server-side) — re-register
+            localStorage.removeItem("signage_device_token");
+            deviceToken = null;
+            return false;
+          }
+          const display = await res.json();
+
+          if (display.status === "PENDING") {
+            showPairingCode(display.pairingCode);
+            return false;
+          }
+
+          // PAIRED (or OFFLINE-but-still-claimed): proceed to playback
+          pairingEl.style.display = "none";
+          return true;
+        }
+
+        // ---- Step 3: realtime "refresh now" channel ------------------------------
+        function connectSocket(displayId) {
+          if (socket) return;
+          socket = io(API_BASE || undefined);
+          socket.on("connect", () => socket.emit("join", displayId));
+          socket.on("content-updated", () => fetchContent());
+        }
+
+        // ---- Step 4: fetch and play the assigned playlist ------------------------
+        async function fetchContent() {
+          const res = await fetch(API_BASE + "/api/displays/me/content", {
+            headers: authHeaders(),
+          });
+          if (!res.ok) return;
+          const data = await res.json();
+
+          playlist = data.items || [];
+
+          if (playlist.length === 0) {
+            stageEl.innerHTML = "";
+            emptyEl.style.display = "flex";
+            clearTimeout(playTimer);
+            return;
+          }
+
+          emptyEl.style.display = "none";
+          currentIndex = Math.min(currentIndex, playlist.length - 1);
+          playCurrent();
+        }
+
+        function playCurrent() {
+          clearTimeout(playTimer);
+          stageEl.innerHTML = "";
+
+          const item = playlist[currentIndex];
+          if (!item) return;
+
+          if (item.type === "IMAGE") {
+            const img = document.createElement("img");
+            img.src = item.url;
+            stageEl.appendChild(img);
+            const seconds =
+              item.durationSecs && item.durationSecs > 0
+                ? item.durationSecs
+                : 10;
+            playTimer = setTimeout(advance, seconds * 1000);
+          } else {
+            const video = document.createElement("video");
+            video.src = item.url;
+            video.autoplay = true;
+            video.muted = true; // most kiosk/TV browsers require muted for autoplay
+            video.playsInline = true;
+            video.onended = advance;
+            stageEl.appendChild(video);
+            // Safety net in case onended never fires (e.g. corrupt file)
+            const fallbackSeconds =
+              item.durationSecs && item.durationSecs > 0
+                ? item.durationSecs
+                : 30;
+            playTimer = setTimeout(advance, (fallbackSeconds + 5) * 1000);
+          }
+        }
+
+        function advance() {
+          currentIndex = (currentIndex + 1) % playlist.length;
+          playCurrent();
+        }
+
+        // ---- Main loop --------------------------------------------------------
+        async function start() {
+          await ensureRegistered();
+
+          // Poll pairing status until claimed
+          const pairedInterval = setInterval(async () => {
+            const paired = await waitUntilPaired();
+            if (paired) {
+              clearInterval(pairedInterval);
+              onPaired();
+            }
+          }, HEARTBEAT_POLL_MS);
+
+          // Also check immediately on load
+          const pairedNow = await waitUntilPaired();
+          if (pairedNow) {
+            clearInterval(pairedInterval);
+            onPaired();
+          }
+        }
+
+        async function onPaired() {
+          const res = await fetch(API_BASE + "/api/displays/me", {
+            headers: authHeaders(),
+          });
+          const display = await res.json();
+          connectSocket(display.id);
+          await fetchContent();
+          setInterval(fetchContent, CONTENT_POLL_MS); // fallback polling
+        }
+
+        start();
+      })();
+    </script>
+  </body>
 </html>
